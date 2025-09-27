@@ -1,0 +1,115 @@
+#COSINE SIMILARITIES
+import os
+import torch
+import numpy as np
+import torchaudio
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+from speechbrain.inference import EncoderClassifier
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Load the Whisper model and processor
+model_name = "openai/whisper-large-v3"
+processor = AutoProcessor.from_pretrained(model_name)
+whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name)
+
+# Load the ECAPA-TDNN model from SpeechBrain
+classifier = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp")
+
+# Directory for stored embeddings
+embedding_output_directory = "/work/oluwatobi-o/Speaker_Identification/Combined_Speakers_embeddings"
+
+# Function to extract Whisper embeddings from intermediate layers
+def extract_whisper_layer_embedding(audio_path, layer_index=-2):
+    # Load audio and convert to waveform tensor using torchaudio
+    waveform, sr = torchaudio.load(audio_path)
+    
+    # Resample audio to 16,000 Hz if necessary
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+        sr = 16000  # Update sampling rate after resampling
+    
+    waveform = waveform.squeeze().numpy()
+    inputs = processor(waveform, sampling_rate=sr, return_tensors="pt")
+    
+    # Initialize random embeddings for decoder input
+    batch_size = inputs["input_features"].shape[0]
+    sequence_length = inputs["input_features"].shape[1]
+    decoder_embedding_dim = whisper_model.config.d_model
+    
+    decoder_inputs_embeds = torch.randn(batch_size, sequence_length, decoder_embedding_dim)
+
+    # Extract embeddings from the specified Whisper layer
+    with torch.no_grad():
+        outputs = whisper_model(
+            **inputs,
+            decoder_inputs_embeds=decoder_inputs_embeds,
+            output_hidden_states=True
+        )
+        hidden_states = outputs.encoder_hidden_states
+        whisper_embedding = hidden_states[layer_index].mean(dim=1).squeeze().numpy()
+
+    return whisper_embedding
+
+# Function to extract ECAPA-TDNN embeddings using SpeechBrain
+def extract_ecapa_embedding(audio_path):
+    # Load audio using torchaudio
+    waveform, sr = torchaudio.load(audio_path)
+    
+    # Resample audio to 16,000 Hz if necessary
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+    
+    waveform = waveform.squeeze().unsqueeze(0)  # Adjust shape for SpeechBrain
+
+    # Extract ECAPA-TDNN embedding
+    with torch.no_grad():
+        ecapa_embedding = classifier.encode_batch(waveform).squeeze().numpy()
+    
+    return ecapa_embedding
+
+# Function to extract combined embeddings for verification
+def extract_combined_embeddings(audio_path):
+    whisper_embedding = extract_whisper_layer_embedding(audio_path)
+    ecapa_embedding = extract_ecapa_embedding(audio_path)
+    combined_embedding = np.concatenate((whisper_embedding, ecapa_embedding))
+    return combined_embedding
+
+# Load the stored embeddings for all speakers
+stored_embeddings = {}
+for speaker_folder in os.listdir(embedding_output_directory):
+    speaker_folder_path = os.path.join(embedding_output_directory, speaker_folder)
+    if os.path.isdir(speaker_folder_path):
+        # Load each combined embedding for the speaker
+        for embedding_file in os.listdir(speaker_folder_path):
+            if embedding_file.endswith(".npy"):
+                embedding_path = os.path.join(speaker_folder_path, embedding_file)
+                stored_embeddings[embedding_path] = (speaker_folder, np.load(embedding_path))
+
+# Speaker verification using a new audio sample
+def verify_speaker(new_audio_path, threshold=0.7):
+    # Extract embeddings for the new audio
+    new_embedding = extract_combined_embeddings(new_audio_path)
+    
+    max_similarity = 0
+    identified_speaker = None
+
+    # Compare against stored embeddings
+    for embedding_path, (speaker_name, stored_embedding) in stored_embeddings.items():
+        similarity = cosine_similarity([new_embedding], [stored_embedding])[0][0]
+        
+        # Find the speaker with the highest similarity
+        if similarity > max_similarity:
+            max_similarity = similarity
+            identified_speaker = speaker_name  # Use speaker name associated with the embedding
+
+    # Determine if the speaker is verified
+    if max_similarity >= threshold:
+        print(f"Speaker identified as '{identified_speaker}' with similarity: {max_similarity:.2f}")
+    else:
+        print(f"Speaker not verified. Maximum similarity: {max_similarity:.2f}")
+
+# Example usage for verification
+verification_audio_path = "/work/oluwatobi-o/Rownak.wav"  # Update path to the new verification audio
+verify_speaker(verification_audio_path)
