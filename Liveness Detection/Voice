@@ -1,0 +1,118 @@
+#Generating Spoofed Voice
+
+import torch
+import torchaudio
+import torchaudio.transforms as transforms
+import numpy as np
+import random
+import os
+from scipy.io import wavfile
+import warnings
+from scipy.io.wavfile import WavFileWarning
+import soundfile as sf
+
+# Ignore WavFile warnings about incomplete reads
+warnings.simplefilter("ignore", WavFileWarning)
+
+# Define constants
+NOISE_LEVEL = 0.02
+PITCH_SHIFT_STEPS = 2
+MAX_DURATION = 10
+GRAIN_SIZE = 100  # Grain size for granular synthesis in samples
+
+# Function to align tensor lengths
+def match_length(tensor1, tensor2):
+    min_length = min(tensor1.size(-1), tensor2.size(-1))
+    return tensor1[..., :min_length], tensor2[..., :min_length]
+
+# Generate a sine wave
+def generate_sine_wave(frequency, sample_rate, duration):
+    t = torch.linspace(0, duration, int(sample_rate * duration))
+    return torch.sin(2 * np.pi * frequency * t)
+
+# Main spoofing function
+def generate_spoofed_sample(waveform, sample_rate):
+    waveform_tensor = torch.FloatTensor(waveform).unsqueeze(0).unsqueeze(0)
+
+    # Step 1: Apply VOSIM Filter
+    vosim_kernel = torch.exp(-0.01 * torch.arange(100)).unsqueeze(0).unsqueeze(0)
+    reverberated = torch.nn.functional.conv1d(waveform_tensor, vosim_kernel, padding=50)
+    reverberated, waveform_tensor = match_length(reverberated, waveform_tensor)
+    reverberated += waveform_tensor
+
+    # Step 2: Additive Synthesis for Harmonic Complexity
+    sine_wave1 = generate_sine_wave(500, sample_rate, waveform_tensor.size(-1) / sample_rate).unsqueeze(0)
+    sine_wave2 = generate_sine_wave(1000, sample_rate, waveform_tensor.size(-1) / sample_rate).unsqueeze(0)
+    sine_wave3 = generate_sine_wave(1500, sample_rate, waveform_tensor.size(-1) / sample_rate).unsqueeze(0)
+    additive_synthesis = sine_wave1 + sine_wave2 + sine_wave3
+    additive_synthesis, reverberated = match_length(additive_synthesis, reverberated)
+    reverberated += 0.02 * additive_synthesis
+
+    # Step 3: Granular Synthesis for Texture and Movement
+    grains = []
+    for i in range(0, reverberated.size(-1) - GRAIN_SIZE, GRAIN_SIZE):
+        grain = reverberated[:, :, i:i + GRAIN_SIZE]
+        if random.random() > 0.5:
+            grain = grain.flip(dims=[-1])
+        grains.append(grain)
+    spoofed_waveform = torch.cat(grains, dim=-1)
+
+    # Step 4: Add noise for environmental replay effect
+    noise = torch.randn_like(spoofed_waveform) * NOISE_LEVEL
+    spoofed_waveform += noise
+
+    # Step 5: Pitch Shift
+    pitch_shift = transforms.PitchShift(sample_rate, n_steps=PITCH_SHIFT_STEPS)
+    spoofed_waveform = pitch_shift(spoofed_waveform.squeeze(0)).unsqueeze(0)
+
+    # Step 6: Compression Artifacts
+    compressor = transforms.AmplitudeToDB()
+    spoofed_waveform = compressor(spoofed_waveform)
+
+    # Step 7: Background Noise
+    background_noise = torch.randn(1, spoofed_waveform.size(-1)) * 0.01
+    spoofed_waveform, background_noise = match_length(spoofed_waveform, background_noise)
+    spoofed_waveform += background_noise
+
+    return spoofed_waveform.squeeze()
+
+# Main function to create the spoofed dataset
+def create_long_form_spoofed_dataset(original_dir, spoofed_dir):
+    os.makedirs(spoofed_dir, exist_ok=True)
+
+    for speaker_folder in os.listdir(original_dir):
+        speaker_path = os.path.join(original_dir, speaker_folder)
+        spoofed_speaker_path = os.path.join(spoofed_dir, speaker_folder)
+        os.makedirs(spoofed_speaker_path, exist_ok=True)
+
+        for audio_file in os.listdir(speaker_path):
+            audio_path = os.path.join(speaker_path, audio_file)
+            spoofed_audio_path = os.path.join(spoofed_speaker_path, f"long_form_spoofed_{audio_file}")
+
+            # Skip file if it already exists
+            if os.path.exists(spoofed_audio_path):
+                print(f"Skipping existing file: {spoofed_audio_path}")
+                continue
+
+            try:
+                # Load original audio
+                sample_rate, waveform = wavfile.read(audio_path)
+                waveform = np.array(waveform, dtype=np.float32) / 32768  # Normalize
+
+                # Generate spoofed sample
+                spoofed_waveform = generate_spoofed_sample(waveform, sample_rate)
+
+                # Save the spoofed sample
+                sf.write(spoofed_audio_path, spoofed_waveform.detach().numpy(), sample_rate)
+                print(f"Long-form spoofed audio saved at: {spoofed_audio_path}")
+
+            except Exception as e:
+                print(f"Error processing {audio_path}: {str(e)}")
+
+# Define paths for dataset directories
+ORIGINAL_DATASET_DIR = "/work/oluwatobi-o/Liveness_Detection/16kh_Converted_VoiceInput"
+SPOOFED_DATASET_DIR = "/work/oluwatobi-o/Liveness_Detection/Spoofed_dataset"
+
+# Create the dataset
+create_long_form_spoofed_dataset(ORIGINAL_DATASET_DIR, SPOOFED_DATASET_DIR)
+print("Long-form spoofing dataset creation completed!")
