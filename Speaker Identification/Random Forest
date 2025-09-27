@@ -1,0 +1,105 @@
+#Random Forest 
+
+import os
+import torch
+import numpy as np
+import torchaudio
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+from sklearn.metrics.pairwise import cosine_similarity
+from speechbrain.pretrained import EncoderClassifier
+import joblib
+
+# Paths to saved models and embeddings
+LIVENESS_MODEL_PATH = "/work/oluwatobi-o/Liveness_Detection/random_forest_classifier.pkl"
+EMBEDDING_OUTPUT_DIR = "/work/oluwatobi-o/Speaker_Identification/Combined_Speakers_embeddings"
+
+# Load the liveness detection model (Random Forest)
+rf_model = joblib.load(LIVENESS_MODEL_PATH)
+
+# Load Whisper and ECAPA-TDNN models
+processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
+whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained("openai/whisper-large-v3")
+classifier = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp")
+
+# Function to preprocess audio
+def preprocess_audio(audio_path):
+    waveform, sr = torchaudio.load(audio_path)
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+    return waveform.squeeze()
+
+# Function to extract embeddings
+def extract_combined_embeddings(audio_path):
+    waveform = preprocess_audio(audio_path).numpy()
+
+    # Whisper embedding
+    inputs = processor(waveform, sampling_rate=16000, return_tensors="pt")
+    with torch.no_grad():
+        whisper_outputs = whisper_model(
+            input_features=inputs["input_features"],
+            decoder_input_ids=torch.tensor([[50256]]),  # Dummy token for decoder
+            output_hidden_states=True
+        )
+        whisper_embedding = whisper_outputs.encoder_hidden_states[-2].mean(dim=1).squeeze().numpy()
+
+    # ECAPA embedding
+    waveform_tensor = torch.tensor(waveform).unsqueeze(0)
+    ecapa_embedding = classifier.encode_batch(waveform_tensor).squeeze().numpy()
+
+    # Combine embeddings
+    return np.concatenate((whisper_embedding, ecapa_embedding))
+
+# Function for liveness detection
+def detect_liveness(embedding):
+    prediction = rf_model.predict([embedding])
+    return prediction[0] == 0  # True if live, False if spoofed
+
+# Load stored embeddings
+stored_embeddings = {}
+for speaker_folder in os.listdir(EMBEDDING_OUTPUT_DIR):
+    speaker_folder_path = os.path.join(EMBEDDING_OUTPUT_DIR, speaker_folder)
+    if os.path.isdir(speaker_folder_path):
+        for embedding_file in os.listdir(speaker_folder_path):
+            if embedding_file.endswith(".npy"):
+                embedding_path = os.path.join(speaker_folder_path, embedding_file)
+                stored_embeddings[embedding_path] = (speaker_folder, np.load(embedding_path))
+
+# Speaker verification with liveness detection
+def verify_speaker(new_audio_path, threshold=0.7):
+    print(f"Processing audio: {new_audio_path}")
+
+    # Step 1: Extract embeddings for new audio
+    new_embedding = extract_combined_embeddings(new_audio_path)
+    if new_embedding is None:
+        print("Failed to extract embedding.")
+        return
+
+    # Step 2: Liveness Detection
+    is_live = detect_liveness(new_embedding)
+    if not is_live:
+        print("Audio classified as spoofed. Rejecting...")
+        return
+
+    print("Audio classified as live. Proceeding to speaker verification...")
+
+    # Step 3: Cosine Similarity-based Speaker Verification
+    max_similarity = 0
+    identified_speaker = None
+
+    for embedding_path, (speaker_name, stored_embedding) in stored_embeddings.items():
+        similarity = cosine_similarity([new_embedding], [stored_embedding])[0][0]
+        if similarity > max_similarity:
+            max_similarity = similarity
+            identified_speaker = speaker_name
+
+    if max_similarity >= threshold:
+        print(f"Speaker identified as '{identified_speaker}' with similarity: {max_similarity:.2f}")
+    else:
+        print(f"Speaker not verified. Maximum similarity: {max_similarity:.2f}")
+
+# Example Usage
+if __name__ == "__main__":
+    # Path to the new verification audio
+    verification_audio_path = "/work/oluwatobi-o/Rownak.wav"  # Update to the new audio file
+    verify_speaker(verification_audio_path)
