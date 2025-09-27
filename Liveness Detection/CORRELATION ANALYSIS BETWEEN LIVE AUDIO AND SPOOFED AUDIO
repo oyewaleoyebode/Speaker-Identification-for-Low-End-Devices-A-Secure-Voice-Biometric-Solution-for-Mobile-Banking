@@ -1,0 +1,51 @@
+#CORRELATION ANALYSIS BETWEEN LIVE AUDIO AND SPOOFED AUDIO
+
+import numpy as np
+import librosa
+import os
+from scipy.stats import pearsonr
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Feature extraction function
+def extract_features(file_path, n_mfcc=20):
+    audio, sr = librosa.load(file_path, sr=16000)
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
+    return np.mean(mfcc.T, axis=0)
+
+# Function to traverse nested directory and extract features
+def extract_features_from_directory(base_dir):
+    features = []
+    for speaker_folder in os.listdir(base_dir):
+        speaker_path = os.path.join(base_dir, speaker_folder)
+        if not os.path.isdir(speaker_path):  # Skip if not a directory
+            continue
+        for file_name in os.listdir(speaker_path):
+            if file_name.endswith(".wav"):
+                file_path = os.path.join(speaker_path, file_name)
+                features.append(extract_features(file_path))
+    return np.array(features)
+
+# Paths to data
+live_audio_dir = "/work/oluwatobi-o/Liveness_Detection/16kh_Converted_VoiceInput"
+spoofed_audio_dir = "/work/oluwatobi-o/Liveness_Detection/clone_dataset_output"
+
+# Extract features for live and spoofed data
+live_features = extract_features_from_directory(live_audio_dir)
+spoofed_features = extract_features_from_directory(spoofed_audio_dir)
+
+# Compute correlation
+pearson_corr = []
+cosine_sim = []
+
+for i in range(min(len(live_features), len(spoofed_features))):
+    # Pearson Correlation
+    corr, _ = pearsonr(live_features[i], spoofed_features[i])
+    pearson_corr.append(corr)
+    
+    # Cosine Similarity
+    sim = cosine_similarity([live_features[i]], [spoofed_features[i]])[0][0]
+    cosine_sim.append(sim)
+
+# Analyze results
+print("Average Pearson Correlation:", np.mean(pearson_corr))
+print("Average Cosine Similarity:", np.mean(cosine_sim))
