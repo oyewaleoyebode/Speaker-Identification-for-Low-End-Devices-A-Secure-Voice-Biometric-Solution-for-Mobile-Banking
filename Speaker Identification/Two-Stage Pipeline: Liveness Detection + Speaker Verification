@@ -1,0 +1,115 @@
+#Two-Stage Pipeline: Liveness Detection + Speaker Verification
+
+import os
+import numpy as np
+import joblib
+import torch
+import torchaudio
+from sklearn.metrics.pairwise import cosine_similarity
+from speechbrain.inference import EncoderClassifier
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+
+# Paths to models and embeddings
+SVM_MODEL_PATH = "/work/oluwatobi-o/Liveness_Detection/svm_classifier.pkl"
+SPEAKER_EMBEDDINGS_DIR = "/work/oluwatobi-o/Speaker_Identification/Combined_Speakers_embeddings"  # Stored embeddings
+THRESHOLD_COSINE = 0.8  # Threshold for cosine similarity
+
+# Load SVM liveness detection model
+svm_model = joblib.load(SVM_MODEL_PATH)
+
+# Load Whisper and ECAPA models
+processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
+whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained("openai/whisper-large-v3")
+ecapa_model = EncoderClassifier.from_hparams(
+    source="speechbrain/spkrec-ecapa-voxceleb",
+    savedir="tmp/ecapa",
+    run_opts={"weights_only": True}  # Reduce security risks
+)
+
+# Preprocessing function
+def preprocess_audio(audio_path):
+    waveform, sr = torchaudio.load(audio_path)
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+    waveform = waveform.squeeze()  # Shape adjustment
+    return waveform
+
+# Extract combined embeddings (Whisper + ECAPA-TDNN)
+def extract_combined_embeddings(audio_path):
+    try:
+        waveform = preprocess_audio(audio_path).numpy()
+        # Whisper embedding
+        inputs = processor(waveform, sampling_rate=16000, return_tensors="pt")
+        with torch.no_grad():
+            whisper_outputs = whisper_model(
+                input_features=inputs["input_features"],
+                decoder_input_ids=torch.tensor([[50256]]),  # Dummy token
+                output_hidden_states=True
+            )
+            whisper_embedding = whisper_outputs.encoder_hidden_states[-2].mean(dim=1).squeeze().numpy()
+        # ECAPA embedding
+        waveform = torch.tensor(waveform).unsqueeze(0)
+        ecapa_embedding = ecapa_model.encode_batch(waveform).squeeze().numpy()
+        # Combine embeddings
+        return np.concatenate((whisper_embedding, ecapa_embedding))
+    except Exception as e:
+        print(f"Error extracting embeddings for {audio_path}: {e}")
+        return None
+
+# Liveness detection function
+def detect_liveness(embedding):
+    prediction = svm_model.predict([embedding])
+    return prediction[0] == 0  # Return True if live
+
+# Speaker identification function
+def identify_speaker(input_embedding, embeddings_dir):
+    max_similarity = 0
+    identified_speaker = None
+
+    # Iterate through stored embeddings
+    for speaker_folder in os.listdir(embeddings_dir):
+        speaker_folder_path = os.path.join(embeddings_dir, speaker_folder)
+        if not os.path.isdir(speaker_folder_path):
+            continue
+
+        # Check all embeddings for the current speaker
+        for embedding_file in os.listdir(speaker_folder_path):
+            if embedding_file.endswith(".npy"):
+                stored_embedding_path = os.path.join(speaker_folder_path, embedding_file)
+                stored_embedding = np.load(stored_embedding_path)
+                similarity = cosine_similarity([input_embedding], [stored_embedding])[0][0]
+                if similarity > max_similarity:
+                    max_similarity = similarity
+                    identified_speaker = speaker_folder
+
+    return identified_speaker, max_similarity
+
+# Main function for pipeline
+def process_audio(audio_path):
+    print(f"Processing audio: {audio_path}")
+    embedding = extract_combined_embeddings(audio_path)
+    if embedding is None:
+        print("Failed to extract embedding.")
+        return
+
+    # Stage 1: Liveness Detection
+    is_live = detect_liveness(embedding)
+    if not is_live:
+        print("Audio classified as spoofed. Rejecting...")
+        return
+
+    print("Audio classified as live. Proceeding to speaker identification...")
+
+    # Stage 2: Speaker Identification
+    identified_speaker, similarity = identify_speaker(embedding, SPEAKER_EMBEDDINGS_DIR)
+    if identified_speaker:
+        print(f"Speaker identified as '{identified_speaker}' with similarity {similarity:.2f}.")
+    else:
+        print("Speaker not identified.")
+
+# Example Usage
+if __name__ == "__main__":
+    # Path to the new verification audio
+    verification_audio_path = "/work/oluwatobi-o/Rownak.wav"  # Update to the new audio file
+    process_audio(verification_audio_path)
