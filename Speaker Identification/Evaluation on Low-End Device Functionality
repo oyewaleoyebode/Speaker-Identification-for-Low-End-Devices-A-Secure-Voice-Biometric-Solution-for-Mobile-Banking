@@ -1,0 +1,53 @@
+#Evaluation on Low-End Device Functionality
+#ONNX – ONNX runs faster on CPUs and is optimized for mobile deployment.
+
+import torch
+import os
+
+# Define the trained model architecture
+class WhisperSpeakerRecognitionModel(torch.nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(WhisperSpeakerRecognitionModel, self).__init__()
+        self.fc1 = torch.nn.Linear(input_dim, 256)
+        self.relu = torch.nn.ReLU()
+        self.dropout = torch.nn.Dropout(0.3)
+        self.fc2 = torch.nn.Linear(256, 128)
+        self.fc3 = torch.nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.fc3(x)
+        return x
+
+# Initialize the model
+input_dim = 1472  # Model input size
+num_classes = 50  # Number of speaker classes
+model = WhisperSpeakerRecognitionModel(input_dim, num_classes)
+
+# Load trained model weights
+model.load_state_dict(torch.load("/work/oluwatobi-o/Speaker_Identification/saved_whisper_model.pth", map_location="cpu"))
+model.eval()  # Set to evaluation mode
+
+# Create dummy input tensor matching the model's expected input shape
+dummy_input = torch.randn(1, input_dim)
+
+# Define ONNX file path
+onnx_model_path = "/work/oluwatobi-o/Speaker_Identification/saved_whisper_model.onnx"
+
+# Export the PyTorch model to ONNX
+torch.onnx.export(
+    model, 
+    dummy_input, 
+    onnx_model_path, 
+    export_params=True, 
+    opset_version=12,  # Set ONNX version
+    do_constant_folding=True,  # Optimize constant calculations
+    input_names=["input"], 
+    output_names=["output"]
+)
+
+print(f"✅ Model successfully converted to ONNX and saved at: {onnx_model_path}")
