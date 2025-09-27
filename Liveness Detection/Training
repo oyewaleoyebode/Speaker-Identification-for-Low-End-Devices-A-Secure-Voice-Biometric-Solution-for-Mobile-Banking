@@ -1,0 +1,99 @@
+#Training
+
+import os
+import numpy as np
+from sklearn.svm import SVC
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from tqdm import tqdm  # Progress bar
+
+# -----------------------------------------------------
+# Step 1: Load Combined Embeddings and Labels
+# -----------------------------------------------------
+# Paths to the dataset
+EMBEDDINGS_PATH = "/work/oluwatobi-o/Liveness_Detection/combined_embeddings/dataset_embeddings.npy"
+LABELS_PATH = "/work/oluwatobi-o/Liveness_Detection/combined_embeddings/dataset_labels.npy"
+
+# Load the embeddings and labels
+X = np.load(EMBEDDINGS_PATH)
+y = np.load(LABELS_PATH)
+
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
+print(f"Testing data: {X_test.shape}, Labels: {y_test.shape}")
+
+# -----------------------------------------------------
+# Step 2: Train an SVM Classifier with Cross-Validation
+# -----------------------------------------------------
+print("\nTraining SVM Classifier with Cross-Validation...")
+
+# Define the SVM model
+svm_model = SVC(kernel='rbf', probability=True, random_state=42)
+
+# Perform cross-validation with progress tracking
+print("\nCross-Validation Progress:")
+cv_scores = []
+for fold in tqdm(range(5), desc="Cross-Validation"):
+    scores = cross_val_score(svm_model, X_train, y_train, cv=5, scoring='accuracy')
+    cv_scores.extend(scores)
+
+print(f"Cross-Validation Accuracy Scores: {cv_scores}")
+print(f"Mean Cross-Validation Accuracy: {np.mean(cv_scores)}")
+
+# -----------------------------------------------------
+# Step 3: Hyperparameter Tuning with Grid Search
+# -----------------------------------------------------
+print("\nPerforming Grid Search for Hyperparameter Tuning...")
+
+# Define hyperparameter grid
+param_grid = {
+    'C': [0.1, 1, 10, 100],  # Regularization parameter
+    'gamma': [1, 0.1, 0.01, 0.001],  # Kernel coefficient
+    'kernel': ['rbf']  # Radial Basis Function kernel
+}
+
+# Perform Grid Search with progress tracking
+grid_search = GridSearchCV(
+    SVC(probability=True, random_state=42),
+    param_grid,
+    cv=5,
+    scoring='accuracy',
+    verbose=3  # Display detailed progress for each step
+)
+grid_search.fit(X_train, y_train)
+
+# Best parameters from Grid Search
+best_params = grid_search.best_params_
+print(f"Best Parameters from Grid Search: {best_params}")
+
+# Train the best model
+best_svm_model = grid_search.best_estimator_
+
+# -----------------------------------------------------
+# Step 4: Evaluate the Model on Test Set
+# -----------------------------------------------------
+print("\nEvaluating the Best SVM Model on the Test Set...")
+
+# Predict on the test set
+y_pred = best_svm_model.predict(X_test)
+
+# Compute accuracy and other metrics
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Test Set Accuracy: {accuracy}")
+print("Classification Report:\n", classification_report(y_test, y_pred))
+
+# Confusion Matrix
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_pred))
+
+# -----------------------------------------------------
+# Step 5: Save the Trained Model
+# -----------------------------------------------------
+import joblib
+MODEL_PATH = "/work/oluwatobi-o/Liveness_Detection/svm_classifier.pkl"
+joblib.dump(best_svm_model, MODEL_PATH)
+print(f"SVM Model saved to {MODEL_PATH}")
+
+print("\nSVM Classifier Training and Evaluation Completed.")
