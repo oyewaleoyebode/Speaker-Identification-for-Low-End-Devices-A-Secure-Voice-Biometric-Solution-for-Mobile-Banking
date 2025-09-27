@@ -1,0 +1,137 @@
+#Checking training for Speaker Identification of 50 Speakers 
+
+import os
+import torch
+import numpy as np
+from torch.utils.data import DataLoader, TensorDataset, random_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from transformers import WhisperModel, WhisperProcessor
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+
+# Load Whisper model
+whisper_model_name = "openai/whisper-base"
+whisper_model = WhisperModel.from_pretrained(whisper_model_name)
+whisper_processor = WhisperProcessor.from_pretrained(whisper_model_name)
+
+# Directory for embeddings
+embedding_output_directory = "/work/oluwatobi-o/Speaker_Identification/Combined_Speakers_embeddings"
+
+# Load embeddings and labels
+X_data, y_data = [], []
+speaker_label_mapping = {}
+label_counter = 0
+
+for speaker_folder in os.listdir(embedding_output_directory):
+    speaker_folder_path = os.path.join(embedding_output_directory, speaker_folder)
+    
+    if os.path.isdir(speaker_folder_path):
+        if speaker_folder not in speaker_label_mapping:
+            speaker_label_mapping[speaker_folder] = label_counter
+            label_counter += 1
+
+        for embedding_file in os.listdir(speaker_folder_path):
+            embedding_path = os.path.join(speaker_folder_path, embedding_file)
+            embedding = np.load(embedding_path)
+            X_data.append(embedding)
+            y_data.append(speaker_label_mapping[speaker_folder])
+
+# Convert lists to NumPy arrays
+X_data = np.array(X_data)
+y_data = np.array(y_data)
+
+# Normalize embeddings using StandardScaler
+scaler = StandardScaler()
+X_data = scaler.fit_transform(X_data)
+
+# Convert to PyTorch tensors
+X_data = torch.tensor(X_data, dtype=torch.float32)
+y_data = torch.tensor(y_data, dtype=torch.long)
+
+# Split into Train (70%) and Validation (30%)
+X_train, X_val, y_train, y_val = train_test_split(X_data, y_data, test_size=0.3, random_state=42, stratify=y_data)
+
+# Convert to PyTorch DataLoader
+train_dataset = TensorDataset(X_train, y_train)
+val_dataset = TensorDataset(X_val, y_val)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+# Define the model using Whisper embeddings
+class WhisperSpeakerRecognitionModel(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(WhisperSpeakerRecognitionModel, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.3)  # Dropout to prevent overfitting
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.fc3(x)
+        return x
+
+# Initialize the model
+input_dim = X_data.shape[1]  # Use the actual embedding size
+num_speakers = len(speaker_label_mapping)
+model = WhisperSpeakerRecognitionModel(input_dim, num_speakers)
+
+# Optimizer and Loss Function
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+criterion = nn.CrossEntropyLoss()
+
+# Training loop
+num_epochs = 100  # Lower epochs for monitoring
+for epoch in range(num_epochs):
+    model.train()
+    epoch_loss = 0
+    for batch_x, batch_y in train_loader:
+        outputs = model(batch_x)
+        loss = criterion(outputs, batch_y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+    
+    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(train_loader)}")
+
+# Save the trained model
+model_save_path = "/work/oluwatobi-o/Speaker_Identification/saved_whisper_model.pth"
+torch.save(model.state_dict(), model_save_path)
+print(f"Model saved to {model_save_path}")
+
+# Evaluation function
+def evaluate_model(model, data_loader, data_type="Validation"):
+    model.eval()  # Set the model to evaluation mode
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch_x, batch_y in data_loader:
+            outputs = model(batch_x)
+            _, preds = torch.max(outputs, 1)  # Get the predicted classes
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(batch_y.cpu().numpy())
+    
+    # Calculate metrics
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+    
+    print(f"\n📊 {data_type} Metrics:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1 Score: {f1:.4f}\n")
+
+# Evaluate on both train and validation sets
+evaluate_model(model, train_loader, "Training")
+evaluate_model(model, val_loader, "Validation")
