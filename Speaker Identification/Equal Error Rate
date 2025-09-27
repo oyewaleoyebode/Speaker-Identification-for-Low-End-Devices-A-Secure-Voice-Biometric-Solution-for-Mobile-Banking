@@ -3,18 +3,21 @@
 import os
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.metrics import roc_curve
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm  # Progress bar for better monitoring
 
 # Directory for embeddings
 embedding_output_directory = "/work/oluwatobi-o/Speaker_Identification/Combined_Speakers_embeddings"
 
-# Load Embeddings and Labels
+# Load Embeddings and Labels Efficiently
 X_data, y_data = [], []
 speaker_label_mapping = {}
 label_counter = 0
 
-for speaker_folder in os.listdir(embedding_output_directory):
+print("Loading Embeddings and Labels...")
+for speaker_folder in tqdm(os.listdir(embedding_output_directory)):
     speaker_folder_path = os.path.join(embedding_output_directory, speaker_folder)
     
     if os.path.isdir(speaker_folder_path):
@@ -28,12 +31,11 @@ for speaker_folder in os.listdir(embedding_output_directory):
             X_data.append(embedding)
             y_data.append(speaker_label_mapping[speaker_folder])
 
-# Convert lists to NumPy arrays
+# Convert to NumPy arrays
 X_data = np.array(X_data)
 y_data = np.array(y_data)
 
 # Normalize embeddings using StandardScaler
-from sklearn.preprocessing import StandardScaler
 scaler = StandardScaler()
 X_data = scaler.fit_transform(X_data)
 
@@ -41,9 +43,9 @@ X_data = scaler.fit_transform(X_data)
 X_data = torch.tensor(X_data, dtype=torch.float32)
 y_data = torch.tensor(y_data, dtype=torch.long)
 
-# Split into Train (70%) and Validation (30%)
-from sklearn.model_selection import train_test_split
-_, X_val, _, y_val = train_test_split(X_data, y_data, test_size=0.3, random_state=42, stratify=y_data)
+# DataLoader for Batch Processing
+val_dataset = TensorDataset(X_data, y_data)
+val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)  # Larger batch size for faster computation
 
 # Load Trained Model
 class WhisperSpeakerRecognitionModel(torch.nn.Module):
@@ -51,7 +53,7 @@ class WhisperSpeakerRecognitionModel(torch.nn.Module):
         super(WhisperSpeakerRecognitionModel, self).__init__()
         self.fc1 = torch.nn.Linear(input_dim, 256)
         self.relu = torch.nn.ReLU()
-        self.dropout = torch.nn.Dropout(0.3)  # Dropout to prevent overfitting
+        self.dropout = torch.nn.Dropout(0.3)
         self.fc2 = torch.nn.Linear(256, 128)
         self.fc3 = torch.nn.Linear(128, num_classes)
 
@@ -65,7 +67,7 @@ class WhisperSpeakerRecognitionModel(torch.nn.Module):
         return x
 
 # Initialize Model
-input_dim = X_data.shape[1]  # Use the actual embedding size
+input_dim = X_data.shape[1]
 num_speakers = len(speaker_label_mapping)
 model = WhisperSpeakerRecognitionModel(input_dim, num_speakers)
 
@@ -80,35 +82,30 @@ def calculate_eer(y_true, y_proba):
     fnr = 1 - tpr
     eer_threshold_index = np.nanargmin(np.abs(fnr - fpr))
     eer = (fpr[eer_threshold_index] + fnr[eer_threshold_index]) / 2
-    return eer, fpr, tpr, thresholds
+    return eer
 
-# Calculate EER and Plot ROC for each class
-all_probs = []
-all_labels = []
+# Calculate EER for Each Speaker
+speaker_eer = []
 
-# Get Probabilities
 with torch.no_grad():
-    for i in range(len(X_val)):
-        output = model(X_val[i].unsqueeze(0))
-        probabilities = torch.nn.functional.softmax(output, dim=1)
-        all_probs.append(probabilities.cpu().numpy().flatten())
-        all_labels.append(y_val[i].item())
+    print("Calculating EER for Each Speaker...")
+    for speaker_id in tqdm(range(num_speakers)):
+        speaker_probs = []
+        speaker_labels = []
 
-# Evaluate for each class
-for class_index in range(num_speakers):
-    y_true_class = [1 if label == class_index else 0 for label in all_labels]
-    y_proba_class = [probs[class_index] for probs in all_probs]
+        for batch_x, batch_y in val_loader:
+            outputs = model(batch_x)
+            probabilities = torch.nn.functional.softmax(outputs, dim=1).cpu().numpy()
+            
+            # Get the probabilities and labels for the current speaker
+            speaker_probs.extend(probabilities[:, speaker_id])
+            speaker_labels.extend((batch_y.cpu().numpy() == speaker_id).astype(int))
 
-    eer, fpr, tpr, thresholds = calculate_eer(y_true_class, y_proba_class)
-    print(f"Class {class_index} - Equal Error Rate (EER): {eer:.4f}")
-    
-    # Plot ROC Curve
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, label=f'Class {class_index} ROC Curve (AUC = {roc_auc_score(y_true_class, y_proba_class):.2f})')
-    plt.plot([0, 1], [0, 1], linestyle='--', color='gray')  # Random classifier line
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title(f'ROC Curve - Class {class_index}')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+        # Calculate EER for current speaker
+        eer = calculate_eer(speaker_labels, speaker_probs)
+        speaker_eer.append(eer)
+        print(f"EER for Speaker {speaker_id}: {eer:.4f}")
+
+# Calculate Average EER
+average_eer = np.mean(speaker_eer)
+print(f"\n✅ Average Equal Error Rate (EER) for all Speakers: {average_eer:.4f}")
