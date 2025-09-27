@@ -1,0 +1,57 @@
+#Spectral Features 
+import os
+import torchaudio
+import numpy as np
+
+# Paths to the real and spoofed audio datasets
+real_audio_path = "/work/oluwatobi-o/Liveness_Detection/16kh_Converted_VoiceInput"
+spoofed_audio_path = "/work/oluwatobi-o/Liveness_Detection/Spoofed_dataset"
+
+# Output paths to save extracted spectral features
+real_features_output_path = "/work/oluwatobi-o/Liveness_Detection/Real_Spectral_Features"
+spoofed_features_output_path = "/work/oluwatobi-o/Liveness_Detection/Spoofed_Spectral_Features"
+os.makedirs(real_features_output_path, exist_ok=True)
+os.makedirs(spoofed_features_output_path, exist_ok=True)
+
+# Function to extract Mel Spectrogram mean values from waveform
+def extract_mel_spectral_features(waveform, sample_rate=16000):
+    mel_spec_transform = torchaudio.transforms.MelSpectrogram(sample_rate=sample_rate, n_mels=40)
+    mel_spec = mel_spec_transform(waveform).squeeze().numpy()
+    mel_spec_mean = mel_spec.mean(axis=1)
+    return mel_spec_mean
+
+# Process and save features for each audio file in the real audio dataset
+for speaker_folder in os.listdir(real_audio_path):
+    speaker_path = os.path.join(real_audio_path, speaker_folder)
+    if os.path.isdir(speaker_path):
+        # Create a corresponding output directory for each speaker
+        speaker_output_dir = os.path.join(real_features_output_path, speaker_folder)
+        os.makedirs(speaker_output_dir, exist_ok=True)
+        
+        for audio_file in os.listdir(speaker_path):
+            file_path = os.path.join(speaker_path, audio_file)
+            waveform, sample_rate = torchaudio.load(file_path)
+            mel_features = extract_mel_spectral_features(waveform, sample_rate)
+            
+            # Save the features for this individual audio file
+            feature_file_path = os.path.join(speaker_output_dir, f"{audio_file}_features.npy")
+            np.save(feature_file_path, mel_features)
+
+# Process and save features for each audio file in the spoofed audio dataset
+for speaker_folder in os.listdir(spoofed_audio_path):
+    speaker_path = os.path.join(spoofed_audio_path, speaker_folder)
+    if os.path.isdir(speaker_path):
+        # Create a corresponding output directory for each speaker
+        speaker_output_dir = os.path.join(spoofed_features_output_path, speaker_folder)
+        os.makedirs(speaker_output_dir, exist_ok=True)
+        
+        for audio_file in os.listdir(speaker_path):
+            file_path = os.path.join(speaker_path, audio_file)
+            waveform, sample_rate = torchaudio.load(file_path)
+            mel_features = extract_mel_spectral_features(waveform, sample_rate)
+            
+            # Save the features for this individual audio file
+            feature_file_path = os.path.join(speaker_output_dir, f"{audio_file}_features.npy")
+            np.save(feature_file_path, mel_features)
+
+print("Spectral features saved for each audio file in real and spoofed datasets.")
