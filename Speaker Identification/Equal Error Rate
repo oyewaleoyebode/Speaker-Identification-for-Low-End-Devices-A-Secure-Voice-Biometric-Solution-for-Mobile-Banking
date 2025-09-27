@@ -1,0 +1,114 @@
+#Equal Error Rate
+
+import os
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, roc_auc_score
+
+# Directory for embeddings
+embedding_output_directory = "/work/oluwatobi-o/Speaker_Identification/Combined_Speakers_embeddings"
+
+# Load Embeddings and Labels
+X_data, y_data = [], []
+speaker_label_mapping = {}
+label_counter = 0
+
+for speaker_folder in os.listdir(embedding_output_directory):
+    speaker_folder_path = os.path.join(embedding_output_directory, speaker_folder)
+    
+    if os.path.isdir(speaker_folder_path):
+        if speaker_folder not in speaker_label_mapping:
+            speaker_label_mapping[speaker_folder] = label_counter
+            label_counter += 1
+
+        for embedding_file in os.listdir(speaker_folder_path):
+            embedding_path = os.path.join(speaker_folder_path, embedding_file)
+            embedding = np.load(embedding_path)
+            X_data.append(embedding)
+            y_data.append(speaker_label_mapping[speaker_folder])
+
+# Convert lists to NumPy arrays
+X_data = np.array(X_data)
+y_data = np.array(y_data)
+
+# Normalize embeddings using StandardScaler
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+X_data = scaler.fit_transform(X_data)
+
+# Convert to PyTorch tensors
+X_data = torch.tensor(X_data, dtype=torch.float32)
+y_data = torch.tensor(y_data, dtype=torch.long)
+
+# Split into Train (70%) and Validation (30%)
+from sklearn.model_selection import train_test_split
+_, X_val, _, y_val = train_test_split(X_data, y_data, test_size=0.3, random_state=42, stratify=y_data)
+
+# Load Trained Model
+class WhisperSpeakerRecognitionModel(torch.nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(WhisperSpeakerRecognitionModel, self).__init__()
+        self.fc1 = torch.nn.Linear(input_dim, 256)
+        self.relu = torch.nn.ReLU()
+        self.dropout = torch.nn.Dropout(0.3)  # Dropout to prevent overfitting
+        self.fc2 = torch.nn.Linear(256, 128)
+        self.fc3 = torch.nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.fc3(x)
+        return x
+
+# Initialize Model
+input_dim = X_data.shape[1]  # Use the actual embedding size
+num_speakers = len(speaker_label_mapping)
+model = WhisperSpeakerRecognitionModel(input_dim, num_speakers)
+
+# Load saved model
+model_save_path = "/work/oluwatobi-o/Speaker_Identification/saved_whisper_model.pth"
+model.load_state_dict(torch.load(model_save_path))
+model.eval()
+
+# Function to Calculate EER
+def calculate_eer(y_true, y_proba):
+    fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+    fnr = 1 - tpr
+    eer_threshold_index = np.nanargmin(np.abs(fnr - fpr))
+    eer = (fpr[eer_threshold_index] + fnr[eer_threshold_index]) / 2
+    return eer, fpr, tpr, thresholds
+
+# Calculate EER and Plot ROC for each class
+all_probs = []
+all_labels = []
+
+# Get Probabilities
+with torch.no_grad():
+    for i in range(len(X_val)):
+        output = model(X_val[i].unsqueeze(0))
+        probabilities = torch.nn.functional.softmax(output, dim=1)
+        all_probs.append(probabilities.cpu().numpy().flatten())
+        all_labels.append(y_val[i].item())
+
+# Evaluate for each class
+for class_index in range(num_speakers):
+    y_true_class = [1 if label == class_index else 0 for label in all_labels]
+    y_proba_class = [probs[class_index] for probs in all_probs]
+
+    eer, fpr, tpr, thresholds = calculate_eer(y_true_class, y_proba_class)
+    print(f"Class {class_index} - Equal Error Rate (EER): {eer:.4f}")
+    
+    # Plot ROC Curve
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f'Class {class_index} ROC Curve (AUC = {roc_auc_score(y_true_class, y_proba_class):.2f})')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray')  # Random classifier line
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve - Class {class_index}')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
