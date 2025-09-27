@@ -1,0 +1,6 @@
+#pip Installation
+
+%pip install openai-whisper
+%pip install pyannote.audio
+%pip install torch torchvision torchaudio 
+%pip install torch==2.4.0
