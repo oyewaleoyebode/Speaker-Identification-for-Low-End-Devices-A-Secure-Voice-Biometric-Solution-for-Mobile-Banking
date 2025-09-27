@@ -1,0 +1,109 @@
+%pip install pyworld scipy numpy soundfile
+
+import os
+import numpy as np
+import pyworld as pw
+import soundfile as sf
+from scipy.signal import resample
+from scipy.stats import norm
+import random
+
+# Paths
+SOURCE_DIR = "/work/oluwatobi-o/Liveness_Detection/clone_dataset"  # Base directory containing speaker folders
+OUTPUT_DIR = "/work/oluwatobi-o/Liveness_Detection/clone_dataset_output"  # Output directory for generated files
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Adversarial attack utility
+def add_adversarial_perturbation(audio, epsilon=0.002):
+    """Adds adversarial perturbation to the audio signal."""
+    gradient = np.sign(np.random.normal(0, 1, audio.shape))
+    perturbed_audio = audio + epsilon * gradient
+    return np.clip(perturbed_audio, -1.0, 1.0)
+
+# Voice synthesis utility (placeholder for actual TTS model integration)
+def synthesize_voice(text, output_path):
+    """Synthesizes audio from text using a TTS model."""
+    audio_waveform = np.sin(np.linspace(0, 2 * np.pi, 16000 * 2))  # Dummy sine wave audio
+    sf.write(output_path, audio_waveform, 16000)
+    print(f"Generated synthesized voice (placeholder): {output_path}")
+
+# Function to generate spoofed audio for all speakers
+def generate_spoofed_audio(source_dir, output_dir, num_variations=30, use_tts=False):
+    # Iterate through all speaker directories
+    for speaker_folder in os.listdir(source_dir):
+        speaker_path = os.path.join(source_dir, speaker_folder)
+        if not os.path.isdir(speaker_path):
+            continue
+
+        # Output directory for this speaker
+        speaker_output_dir = os.path.join(output_dir, speaker_folder)
+        os.makedirs(speaker_output_dir, exist_ok=True)
+
+        # Check if the speaker is already processed
+        existing_files = [
+            f for f in os.listdir(speaker_output_dir) if f.endswith(".wav")
+        ]
+        if len(existing_files) >= num_variations:
+            print(f"Speaker {speaker_folder} already processed. Skipping...")
+            continue
+
+        # Get all audio files in the speaker's folder
+        audio_files = [
+            os.path.join(speaker_path, f)
+            for f in os.listdir(speaker_path)
+            if f.endswith(".wav")
+        ]
+        if not audio_files:
+            print(f"No audio files found for speaker: {speaker_folder}")
+            continue
+
+        # Randomly pick 2 or more audio files as references
+        reference_files = random.sample(audio_files, k=random.randint(2, len(audio_files)))
+
+        for i in range(num_variations):
+            # Randomly choose a reference file
+            reference_audio_path = random.choice(reference_files)
+
+            # Load the reference audio
+            audio, sample_rate = sf.read(reference_audio_path)
+
+            # Decompose the audio into WORLD features
+            pitch, t = pw.harvest(audio, sample_rate)  # Extract pitch (F0)
+            spectral_envelope = pw.cheaptrick(audio, pitch, t, sample_rate)  # Extract spectral envelope
+            aperiodicity = pw.d4c(audio, pitch, t, sample_rate)  # Extract aperiodicity
+
+            # Choose a spoofing technique
+            transformation_type = np.random.choice(["adversarial", "voice_synthesis", "parametric"])
+
+            if transformation_type == "adversarial":
+                # Add adversarial perturbation
+                perturbed_audio = add_adversarial_perturbation(audio, epsilon=np.random.uniform(0.001, 0.005))
+                output_path = os.path.join(speaker_output_dir, f"spoofed_{i + 1}_adversarial.wav")
+                sf.write(output_path, perturbed_audio, sample_rate)
+                print(f"Generated ({transformation_type}): {output_path}")
+
+            elif transformation_type == "voice_synthesis" and use_tts:
+                # Generate a synthesized voice (placeholder example)
+                text = "This is a synthesized spoofed voice for testing liveness detection."
+                output_path = os.path.join(speaker_output_dir, f"spoofed_{i + 1}_synthesized.wav")
+                synthesize_voice(text, output_path)
+
+            elif transformation_type == "parametric":
+                # Modify WORLD features
+                pitch_variation = pitch * np.random.uniform(0.8, 1.2)
+                spectral_variation = spectral_envelope * np.random.uniform(0.9, 1.1)
+                aperiodicity_variation = aperiodicity * np.random.uniform(0.9, 1.1)
+                synthesized_audio = pw.synthesize(
+                    pitch_variation, spectral_variation, aperiodicity_variation, sample_rate
+                )
+                output_path = os.path.join(speaker_output_dir, f"spoofed_{i + 1}_parametric.wav")
+                sf.write(output_path, synthesized_audio, sample_rate)
+                print(f"Generated ({transformation_type}): {output_path}")
+
+# Main execution
+generate_spoofed_audio(
+    SOURCE_DIR,
+    OUTPUT_DIR,
+    num_variations=30,
+    use_tts=True  # Set to True to enable TTS-based spoofing (replace TTS placeholder with actual model)
+)
