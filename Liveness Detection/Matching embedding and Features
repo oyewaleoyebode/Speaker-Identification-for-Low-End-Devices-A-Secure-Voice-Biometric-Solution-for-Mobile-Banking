@@ -1,0 +1,64 @@
+#Matching Embeddings and Spectral Features
+
+import os
+import numpy as np
+
+# Define paths
+#real_spectral_path = "/work/oluwatobi-o/Liveness_Detection/Real_Spectral_Features"
+#real_embedding_path = "/work/oluwatobi-o/Liveness_Detection/16kh_Converted_VoiceInput_embeddings"
+spoofed_spectral_path = "/work/oluwatobi-o/Liveness_Detection/Spoofed_Spectral_Features"
+spoofed_embedding_path = "/work/oluwatobi-o/Liveness_Detection/Spoofed_embeddings"
+
+# Initialize lists for features and labels
+features = []
+labels = []
+
+# Function to load and combine features from nested directories using partial matching
+def combine_features_with_partial_matching(embedding_path, spectral_path, label):
+    for speaker_folder in os.listdir(embedding_path):
+        speaker_embedding_dir = os.path.join(embedding_path, speaker_folder)
+        speaker_spectral_dir = os.path.join(spectral_path, speaker_folder)
+
+        if os.path.isdir(speaker_embedding_dir) and os.path.isdir(speaker_spectral_dir):
+            # Process each file in the speaker's embedding directory
+            for embedding_file_name in os.listdir(speaker_embedding_dir):
+                # Extract the common identifier (e.g., "audio_10" or "norm_aug_audio_10")
+                identifier = embedding_file_name.split("_combined.npy")[0]
+                
+                # Search for a matching spectral file with the identifier
+                spectral_file_name = next((f for f in os.listdir(speaker_spectral_dir) if identifier in f and f.endswith(".wav_features.npy")), None)
+                
+                if spectral_file_name:
+                    embedding_file = os.path.join(speaker_embedding_dir, embedding_file_name)
+                    spectral_file = os.path.join(speaker_spectral_dir, spectral_file_name)
+
+                    # Load embedding and spectral feature
+                    embedding = np.load(embedding_file)
+                    spectral_feature = np.load(spectral_file)
+
+                    # Combine embedding and spectral features
+                    combined_features = np.concatenate([embedding, spectral_feature])
+                    features.append(combined_features)
+                    labels.append(label)
+                else:
+                    print(f"No spectral match found for {embedding_file_name} in {speaker_folder}")
+
+# Combine real (live) features with partial matching
+combine_features_with_partial_matching(real_embedding_path, real_spectral_path, label=0)
+
+# Combine spoofed features with partial matching
+combine_features_with_partial_matching(spoofed_embedding_path, spoofed_spectral_path, label=1)
+
+# Convert features and labels to numpy arrays for later use
+features = np.array(features)
+labels = np.array(labels)
+
+# Save combined features and labels
+output_features_path = "/work/oluwatobi-o/Liveness_Detection/Fake/combined_features.npy"
+output_labels_path = "/work/oluwatobi-o/Liveness_Detection/Fake/combined_labels.npy"
+
+np.save(output_features_path, features)
+np.save(output_labels_path, labels)
+
+print(f"Combined features saved at: {output_features_path}")
+print(f"Labels saved at: {output_labels_path}")
