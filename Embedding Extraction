@@ -1,0 +1,102 @@
+#Extracting Embedding Features Using Whisper's and ECAPA-TDNN 
+
+import os
+import torch
+import numpy as np
+import torchaudio
+from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+from speechbrain.inference import EncoderClassifier  # Updated import for SpeechBrain
+
+# Load the Whisper model and processor
+model_name = "openai/whisper-large-v3"
+processor = AutoProcessor.from_pretrained(model_name)
+whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name)
+
+# Load the ECAPA-TDNN model from SpeechBrain
+classifier = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb", savedir="tmp")
+
+# Define paths for segmented audio
+segmented_audio_directory = "/work/oluwatobi-o/Whisper_Validation/Dataset_2/segmented_audio"
+embedding_output_directory = "/work/oluwatobi-o/Whisper_Validation/Dataset_2/combined_embeddings"
+os.makedirs(embedding_output_directory, exist_ok=True)
+
+# Function to extract Whisper embeddings from intermediate layers
+def extract_whisper_layer_embedding(audio_path, layer_index=-2):
+    # Load audio and convert to waveform tensor using torchaudio
+    waveform, sr = torchaudio.load(audio_path)
+    
+    # Resample audio to 16,000 Hz if necessary
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+        sr = 16000  # Update sampling rate after resampling
+    
+    waveform = waveform.squeeze().numpy()
+    inputs = processor(waveform, sampling_rate=sr, return_tensors="pt")
+    
+    # Initialize random embeddings for decoder input
+    batch_size = inputs["input_features"].shape[0]
+    sequence_length = inputs["input_features"].shape[1]
+    decoder_embedding_dim = whisper_model.config.d_model
+    
+    decoder_inputs_embeds = torch.randn(batch_size, sequence_length, decoder_embedding_dim)
+
+    # Extract embeddings from the specified Whisper layer
+    with torch.no_grad():
+        outputs = whisper_model(
+            **inputs,
+            decoder_inputs_embeds=decoder_inputs_embeds,
+            output_hidden_states=True
+        )
+        hidden_states = outputs.encoder_hidden_states
+        whisper_embedding = hidden_states[layer_index].mean(dim=1).squeeze().numpy()
+
+    return whisper_embedding
+
+# Function to extract ECAPA-TDNN embeddings using SpeechBrain
+def extract_ecapa_embedding(audio_path):
+    # Load audio using torchaudio
+    waveform, sr = torchaudio.load(audio_path)
+    
+    # Resample audio to 16,000 Hz if necessary
+    if sr != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+        waveform = resampler(waveform)
+    
+    waveform = waveform.squeeze().unsqueeze(0)  # Adjust shape for SpeechBrain
+
+    # Extract ECAPA-TDNN embedding
+    with torch.no_grad():
+        ecapa_embedding = classifier.encode_batch(waveform).squeeze().numpy()
+    
+    return ecapa_embedding
+
+# Extract and save combined embeddings for each audio segment
+for speaker_folder in os.listdir(segmented_audio_directory):
+    speaker_folder_path = os.path.join(segmented_audio_directory, speaker_folder)
+    if os.path.isdir(speaker_folder_path):
+        # Create a directory for each speaker in the output directory
+        speaker_output_directory = os.path.join(embedding_output_directory, speaker_folder)
+        os.makedirs(speaker_output_directory, exist_ok=True)
+        
+        for audio_file in os.listdir(speaker_folder_path):
+            audio_file_path = os.path.join(speaker_folder_path, audio_file)
+            
+            # Skip files that are too short
+            waveform, sr = torchaudio.load(audio_file_path)
+            if waveform.shape[1] < sr * 2:  # Less than 2 seconds of audio
+                continue
+
+            # Extract embeddings from Whisper and ECAPA-TDNN
+            whisper_embedding = extract_whisper_layer_embedding(audio_file_path)
+            ecapa_embedding = extract_ecapa_embedding(audio_file_path)
+
+            # Combine the embeddings (concatenation)
+            combined_embedding = np.concatenate((whisper_embedding, ecapa_embedding))
+
+            # Save the combined embedding for each segment in the speaker's folder
+            embedding_output_path = os.path.join(speaker_output_directory, f"{os.path.splitext(audio_file)[0]}_combined.npy")
+            np.save(embedding_output_path, combined_embedding)
+            print(f"Saved combined embedding to {embedding_output_path}")
+
+print("Finished extracting and saving combined Whisper + ECAPA-TDNN embeddings.")
