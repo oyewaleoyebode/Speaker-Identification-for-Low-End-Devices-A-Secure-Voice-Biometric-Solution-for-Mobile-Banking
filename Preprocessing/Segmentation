@@ -1,0 +1,131 @@
+#Segmentation
+import os
+import pandas as pd
+import numpy as np
+from pydub import AudioSegment
+from pyannote.audio import Model, Inference
+from pyannote.core import Segment
+
+# Define the path to the dataset containing folders of speakers
+dataset_directory = "/work/oluwatobi-o/Whisper_Validation/Dataset_2/yoruba_dataset"
+
+# Define the path to the CSV file containing diarization results
+diarization_csv_path = "/work/oluwatobi-o/Whisper_Validation/Dataset_2/diarization_results.csv"
+
+# Define the new output directory to save segmented audio files
+output_base_directory = "/work/oluwatobi-o/Whisper_Validation/Dataset_2/segmented_audio"
+os.makedirs(output_base_directory, exist_ok=True)
+
+# Define minimum and target segment length in seconds
+target_segment_length = 3.0  # Target segment length (e.g., 3 seconds)
+min_segment_length = 1.0  # Minimum segment length (e.g., 1 second)
+
+# Step 1: Load the Segmentation Model
+model = Model.from_pretrained("pyannote/segmentation-3.0", use_auth_token='')
+inference = Inference(model)
+
+# Step 2: Load Diarization Results from CSV
+diarization_df = pd.read_csv(diarization_csv_path)
+
+# Step 3: Refine Segments Using Pretrained Segmentation Model
+for index, row in diarization_df.iterrows():
+    speaker_folder = row['Speaker Folder']  # Folder name of the speaker
+    audio_file = row['Audio File']  # Audio file name
+    speaker_label = row['Speaker Label']  # Speaker label from diarization
+    start_time = row['Start Time (s)']  # Start time in seconds
+    end_time = row['End Time (s)']  # End time in seconds
+    
+    # Construct the full path to the audio file
+    audio_file_path = os.path.join(dataset_directory, speaker_folder, audio_file)
+    
+    # Check if the audio file exists
+    if not os.path.exists(audio_file_path):
+        print(f"Audio file not found: {audio_file_path}")
+        continue
+    
+    # Load the audio file using pydub
+    audio = AudioSegment.from_wav(audio_file_path)
+    
+    # Ensure the segment times are within the audio duration
+    audio_duration = len(audio) / 1000  # Convert milliseconds to seconds
+    
+    # Clip start and end times to be within the audio duration
+    start_time = max(0, start_time)  # Ensure start time is not less than 0
+    end_time = min(audio_duration, end_time)  # Ensure end time is not greater than the audio duration
+
+    # Skip very short segments that result from clipping
+    if end_time - start_time < min_segment_length:  # Skip segments shorter than minimum length
+        print(f"Skipped too short segment for {audio_file}: Start time ({start_time}s) to end time ({end_time}s).")
+        continue
+    
+    # Step 3.1: Apply Segmentation Model to Refine Segment
+    segment = Segment(start_time, end_time)
+    refined_result = inference.crop(audio_file_path, segment)
+    
+    # Process the SlidingWindowFeature
+    scores = refined_result.data
+    frames = refined_result.sliding_window
+    
+    # Assuming the scores represent speech probability, we can threshold them
+    speech_threshold = 0.5  # Adjust this threshold as needed
+    speech_regions = scores[:, 1] > speech_threshold  # Assuming second column is speech probability
+    
+    # Find contiguous speech regions
+    changes = np.diff(speech_regions.astype(int))
+    speech_starts = np.where(changes == 1)[0] + 1
+    speech_ends = np.where(changes == -1)[0] + 1
+    
+    # Correct the start and end conditions for speech segments
+    if speech_regions[0].any():  # If the first frame is speech
+        speech_starts = np.r_[0, speech_starts]
+    if speech_regions[-1].any():  # If the last frame is speech
+        speech_ends = np.r_[speech_ends, len(speech_regions) - 1]
+    
+    # Create segments from speech regions
+    combined_segments = []
+    current_segment = None
+    
+    for start, end in zip(speech_starts, speech_ends):
+        refined_start = frames[start].start
+        refined_end = frames[end].end
+        
+        # Combine short segments only if they belong to the same speaker
+        if current_segment is None:
+            current_segment = (refined_start, refined_end)
+        else:
+            current_start, current_end = current_segment
+            
+            # Combine if the resulting segment is less than the target length and belongs to the same speaker
+            if (refined_end - current_start) <= target_segment_length and speaker_label == row['Speaker Label']:
+                current_segment = (current_start, refined_end)
+            else:
+                # Save the current segment if it meets the criteria
+                if current_end - current_start >= min_segment_length:
+                    combined_segments.append(current_segment)
+                current_segment = (refined_start, refined_end)
+    
+    # Add the last segment if it meets the criteria
+    if current_segment is not None and (current_segment[1] - current_segment[0]) >= min_segment_length:
+        combined_segments.append(current_segment)
+    
+    # Ensure the output directory for the current speaker exists
+    speaker_output_directory = os.path.join(output_base_directory, speaker_folder)
+    os.makedirs(speaker_output_directory, exist_ok=True)
+    
+    # Save combined segments to the new output directory for each speaker
+    for refined_start, refined_end in combined_segments:
+        refined_start_ms = refined_start * 1000
+        refined_end_ms = refined_end * 1000
+        
+        # Extract the refined segment from the original audio
+        refined_audio_segment = audio[refined_start_ms:refined_end_ms]
+        
+        # Create a filename for the refined segmented audio
+        refined_segment_file_name = f"{speaker_label}_{os.path.splitext(audio_file)[0]}_{refined_start:.2f}s_to_{refined_end:.2f}s.wav"
+        refined_segment_output_path = os.path.join(speaker_output_directory, refined_segment_file_name)
+        
+        # Save the refined segmented audio file in the new output directory for the speaker
+        refined_audio_segment.export(refined_segment_output_path, format="wav")
+        print(f"Refined segment saved in {speaker_output_directory}: {refined_segment_output_path}")
+
+print("All segments have been processed and saved using the pretrained segmentation model.")
